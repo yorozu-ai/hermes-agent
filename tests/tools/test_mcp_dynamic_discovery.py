@@ -113,6 +113,7 @@ class TestRefreshTools:
         old_tool = _make_mcp_tool("contact_create")
         old_tool.inputSchema = {"type": "object", "properties": {"name": {"type": "string"}}}
         old_tool.outputSchema = {"type": "object", "properties": {"contact": {}}}
+        old_tool.annotations = {"readOnlyHint": True, "title": "old"}
         server._tools = [old_tool]
         server._tool_registration_fingerprint = mcp_tool_registration_fingerprint(server._tools)
         server._registered_tool_names = ["mcp__live_srv__contact_create"]
@@ -122,6 +123,7 @@ class TestRefreshTools:
             "type": "object",
             "properties": {"contact": {"properties": {"race": {"type": "string"}}}},
         }
+        new_tool.annotations = {"readOnlyHint": True, "title": "new"}
         with patch(
             "tools.mcp_tool_registration._register_server_tools",
             return_value=server._registered_tool_names,

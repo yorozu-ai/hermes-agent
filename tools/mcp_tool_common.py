@@ -74,11 +74,23 @@ def mcp_tool_registration_fingerprint(tools: list[Any]) -> str:
                     "inputSchema": mcp_field(tool, "input_schema", "inputSchema"),
                     "annotations": mcp_field(tool, "annotations", "annotations"),
                 }
+        annotations = value.get("annotations")
+        if isinstance(annotations, dict):
+            # Registration currently consumes only this trust hint. Other
+            # MCP annotation metadata is intentionally excluded so it cannot
+            # churn the registry or prompt cache.
+            read_only_hint = annotations.get("readOnlyHint", annotations.get("read_only_hint")) is True
+        else:
+            read_only_hint = getattr(annotations, "readOnlyHint", None) is True
+        input_schema = value.get("inputSchema", value.get("input_schema"))
+        if not isinstance(input_schema, dict):
+            input_schema = {}
+        description = value.get("description") or ""
         value = {
             "name": value.get("name"),
-            "description": value.get("description"),
-            "inputSchema": value.get("inputSchema", value.get("input_schema")),
-            "annotations": value.get("annotations"),
+            "description": description,
+            "inputSchema": input_schema,
+            "annotations": {"readOnlyHint": read_only_hint},
         }
         payload.append(value)
     payload.sort(key=lambda item: str(item.get("name", "")) if isinstance(item, dict) else str(item))
