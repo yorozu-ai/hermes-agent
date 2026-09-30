@@ -129,7 +129,7 @@ class MCPServerHealthMixin:
             if registry.get_toolset_for_tool(tool_name) == f"mcp-{self.name}":
                 _registration._deregister_mcp_tool_all_scopes(self, tool_name)
 
-    async def _refresh_tools(self, new_mcp_tools=None, manifest_revision=None):
+    async def _refresh_tools(self, new_mcp_tools=None, manifest_revision=None, manifest_epoch=None):
         """Refresh the registry from a notification or keepalive manifest.
 
         The lock serializes rapid-fire notifications; after the list_tools
@@ -142,12 +142,22 @@ class MCPServerHealthMixin:
         async with self._refresh_lock:
             old_tool_names = set(self._registered_tool_names)
             if new_mcp_tools is None:
+                session = self.session
+                session_epoch = self._session_epoch
                 async with self._rpc_lock:
-                    new_mcp_tools = await _core._paginate_full_list(self.session.list_tools, "tools", self.name)
-                    self._tool_manifest_revision += 1
-                    manifest_revision = self._tool_manifest_revision
+                    new_mcp_tools = await _core._paginate_full_list(session.list_tools, "tools", self.name)
+                if self.session is not session or self._session_epoch != session_epoch:
+                    logger.debug("MCP server '%s': ignoring manifest from an old session", self.name)
+                    return False
+                manifest_epoch = session_epoch
+                self._tool_manifest_revision += 1
+                manifest_revision = self._tool_manifest_revision
             elif manifest_revision is None:
                 manifest_revision = self._tool_manifest_revision
+            if manifest_epoch is not None and manifest_epoch != self._session_epoch:
+                logger.debug("MCP server '%s': ignoring manifest from session epoch %d (current %d)",
+                             self.name, manifest_epoch, self._session_epoch)
+                return False
             if manifest_revision < self._tool_manifest_applied_revision:
                 logger.debug("MCP server '%s': ignoring stale tool manifest revision %d (applied %d)",
                              self.name, manifest_revision, self._tool_manifest_applied_revision)
@@ -188,16 +198,21 @@ class MCPServerHealthMixin:
         connection) and use ``list_tools`` as the liveness probe; prompt-only
         servers propagate the unsupported-ping error.
         """
+        session = self.session
+        session_epoch = self._session_epoch
+
         async def list_tools():
             tools = await asyncio.wait_for(
-                _core._paginate_full_list(self.session.list_tools, "tools", self.name),
+                _core._paginate_full_list(session.list_tools, "tools", self.name),
                 timeout=_KEEPALIVE_RPC_TIMEOUT,
             )
+            if self.session is not session or self._session_epoch != session_epoch:
+                return None
             self._tool_manifest_revision += 1
             return tools
         if not self._ping_unsupported:
             try:
-                await asyncio.wait_for(self.session.send_ping(), timeout=_KEEPALIVE_RPC_TIMEOUT)
+                await asyncio.wait_for(session.send_ping(), timeout=_KEEPALIVE_RPC_TIMEOUT)
             except Exception as exc:
                 if _is_method_not_found_error(exc):
                     if not self._advertises_tools():  # ping definitively unsupported, nothing to fall back to
@@ -268,7 +283,13 @@ class MCPServerHealthMixin:
             self._reconnect_event.set()
             return False
         try:
-            await asyncio.wait_for(self._keepalive_probe(), timeout=timeout)
+            keepalive_tools = await asyncio.wait_for(self._keepalive_probe(), timeout=timeout)
+            if keepalive_tools is not None:
+                await self._refresh_tools(
+                    new_mcp_tools=keepalive_tools,
+                    manifest_revision=self._tool_manifest_revision,
+                    manifest_epoch=self._session_epoch,
+                )
         except Exception as exc:
             root = _unwrap_exception_group(exc)
             logger.warning("MCP server '%s': suspect connection (%s) failed health check (%s: %s) — "

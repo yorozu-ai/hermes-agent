@@ -91,6 +91,7 @@ class MCPServerRunMixin:
                             await self._refresh_tools(
                                 new_mcp_tools=keepalive_tools,
                                 manifest_revision=keepalive_revision,
+                                manifest_epoch=self._session_epoch,
                             )
                     except Exception as exc:
                         root = _errors._unwrap_exception_group(exc)

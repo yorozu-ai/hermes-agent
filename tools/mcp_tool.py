@@ -317,7 +317,7 @@ class MCPServerTask(MCPServerRunMixin, MCPServerTransportMixin, MCPServerHealthM
         "_reconnect_retries", "_session_proven", "_was_parked", "_inflight_tasks", "_reconnecting",
         "_suspect_reason", "_teardown_race", "_permanent_grace_used", "_stdio_child_pids",
         "_ever_connected", "_sse_fallback", "_tool_registration_fingerprint",
-        "_tool_manifest_revision", "_tool_manifest_applied_revision")
+        "_tool_manifest_revision", "_tool_manifest_applied_revision", "_session_epoch")
 
     def __init__(self, name: str):
         self.name = name
@@ -397,6 +397,10 @@ class MCPServerTask(MCPServerRunMixin, MCPServerTransportMixin, MCPServerHealthM
         self._tool_registration_fingerprint: str = ""
         self._tool_manifest_revision: int = 0
         self._tool_manifest_applied_revision: int = 0
+        # Monotonic identity for the current ClientSession. Manifest results
+        # from an earlier connection must never overwrite a newly discovered
+        # session, even when the old request completes later.
+        self._session_epoch: int = 0
 
     # Content types a real Streamable-HTTP endpoint may return on the initial POST/GET;
     # anything else on a 2xx means the URL is not an MCP endpoint.

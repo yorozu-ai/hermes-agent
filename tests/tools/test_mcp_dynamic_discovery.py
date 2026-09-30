@@ -150,6 +150,50 @@ class TestRefreshTools:
         assert server._tools == [new_tool]
         assert server._tool_registration_fingerprint == mcp_tool_registration_fingerprint([new_tool])
 
+    @pytest.mark.asyncio
+    async def test_discards_manifest_that_finishes_after_session_reconnect(self):
+        """A delayed old-session response cannot replace a newly discovered manifest."""
+        server = MCPServerTask("live_srv")
+        server._config = {}
+        server.initialize_result = SimpleNamespace(capabilities=SimpleNamespace(tools=SimpleNamespace()))
+        old_session = SimpleNamespace()
+        new_session = SimpleNamespace()
+        server.session = old_session
+        server._session_epoch = 1
+
+        async def list_tools():
+            server.session = new_session
+            server._session_epoch = 2
+            return SimpleNamespace(tools=[_make_mcp_tool("stale_tool")])
+
+        old_session.list_tools = list_tools
+        await server._refresh_tools()
+
+        assert server._tools == []
+        assert server._tool_manifest_revision == 0
+
+
+    @pytest.mark.asyncio
+    async def test_suspect_health_refreshes_registration_from_manifest(self):
+        """A successful suspect-session probe applies changed input schemas."""
+        server = MCPServerTask("live_srv")
+        server.initialize_result = SimpleNamespace(capabilities=SimpleNamespace(tools=SimpleNamespace()))
+        server.session = SimpleNamespace()
+        server._suspect_reason = "keepalive failed"
+        manifest = [_make_mcp_tool("contact_create")]
+
+        with patch.object(MCPServerTask, "_keepalive_probe", new=AsyncMock(return_value=manifest)) as probe:
+            with patch.object(MCPServerTask, "_refresh_tools", new=AsyncMock()) as refresh:
+                assert await server.ensure_healthy() is True
+
+        probe.assert_awaited_once()
+        refresh.assert_awaited_once_with(
+            new_mcp_tools=manifest,
+            manifest_revision=server._tool_manifest_revision,
+            manifest_epoch=server._session_epoch,
+        )
+        assert server._suspect_reason is None
+
 
 @pytest.mark.asyncio
 async def test_mcp_sdk_accepts_new_output_schema_after_tools_list_refresh():

@@ -112,6 +112,7 @@ class MCPServerTransportMixin:
         moments later, so only keepalive/tool-call success clears the reconnect budget."""
         self.initialize_result = await self._negotiate_session(session, connect_timeout)
         self.session = session
+        self._session_epoch += 1
         if mark_lifecycle:
             self._mark_lifecycle_started()
         await self._discover_tools()
