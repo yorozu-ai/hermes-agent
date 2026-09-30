@@ -351,6 +351,22 @@ class TestKeepaliveProbeFallback:
 
         assert task._ping_unsupported is False
 
+    async def test_list_tools_failure_after_ping_is_not_retried_or_latched(self):
+        """A manifest timeout must not be mistaken for an unsupported ping."""
+        task = MCPServerTask("test")
+        task.initialize_result = _caps(tools=SimpleNamespace())
+        task.session = SimpleNamespace(
+            send_ping=AsyncMock(),
+            list_tools=AsyncMock(side_effect=asyncio.TimeoutError()),
+        )
+
+        with pytest.raises((TimeoutError, asyncio.TimeoutError)):
+            await task._keepalive_probe()
+
+        task.session.send_ping.assert_awaited_once()
+        task.session.list_tools.assert_awaited_once()
+        assert task._ping_unsupported is False
+
     async def test_silent_ping_drop_no_tools_propagates(self):
         """A server that has no tools capability and times out on ping has no
         fallback probe — the timeout must propagate immediately."""

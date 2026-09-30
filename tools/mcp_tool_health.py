@@ -186,10 +186,6 @@ class MCPServerHealthMixin:
         if not self._ping_unsupported:
             try:
                 await asyncio.wait_for(self.session.send_ping(), timeout=_KEEPALIVE_RPC_TIMEOUT)
-                # Ping proves transport liveness but carries no tool schema.
-                # Fetch the manifest too so long-lived clients observe
-                # output-schema-only contract changes.
-                return await list_tools() if self._advertises_tools() else None
             except Exception as exc:
                 if _is_method_not_found_error(exc):
                     if not self._advertises_tools():  # ping definitively unsupported, nothing to fall back to
@@ -210,6 +206,12 @@ class MCPServerHealthMixin:
                     return keepalive_tools
                 else:
                     raise  # closed transport, expired session, etc. — real failure
+            else:
+                # Keep the manifest fetch outside the ping exception handler:
+                # a tools/list timeout is a real failure, not evidence that ping
+                # is unsupported and not a reason to issue a duplicate list.
+                # Ping proves transport liveness but carries no tool schema.
+                return await list_tools() if self._advertises_tools() else None
         return await list_tools()
 
     def _mark_session_proven(self) -> None:
