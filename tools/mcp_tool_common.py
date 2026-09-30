@@ -1,6 +1,8 @@
 """Small pure helpers shared by the tools.mcp_tool_* modules: SDK 1.x/2.x field access,
 error-text sanitising, numeric/bool coercion, timeouts and jitter. No origin state."""
 
+import hashlib
+import json
 import logging
 import math
 import os
@@ -36,6 +38,64 @@ def mcp_field(obj, snake: str, camel: str, default=None):
     if value is _MISSING:
         value = getattr(obj, camel, _MISSING)
     return default if value is _MISSING else value
+
+
+def mcp_tool_registration_fingerprint(tools: list[Any]) -> str:
+    """Fingerprint the MCP fields that affect Hermes tool registration.
+
+    The MCP SDK absorbs ``outputSchema`` into its own result validator while
+    ``tools/list`` runs. Hermes only needs to republish a tool when the name,
+    description, input schema, or annotations used by registration change.
+    """
+    payload = []
+    for tool in tools or []:
+        if isinstance(tool, dict):
+            value = tool
+        else:
+            value = None
+            for method_name in ("model_dump", "dict"):
+                method = getattr(tool, method_name, None)
+                if callable(method):
+                    try:
+                        value = method(mode="json", by_alias=True)
+                    except TypeError:
+                        try:
+                            value = method(by_alias=True)
+                        except TypeError:
+                            value = method()
+                    except Exception:
+                        value = None
+                    if isinstance(value, dict):
+                        break
+            if not isinstance(value, dict):
+                value = {
+                    "name": mcp_field(tool, "name", "name"),
+                    "description": mcp_field(tool, "description", "description"),
+                    "inputSchema": mcp_field(tool, "input_schema", "inputSchema"),
+                    "annotations": mcp_field(tool, "annotations", "annotations"),
+                }
+        annotations = value.get("annotations")
+        if isinstance(annotations, dict):
+            # Registration currently consumes only this trust hint. Other
+            # MCP annotation metadata is intentionally excluded so it cannot
+            # churn the registry or prompt cache.
+            read_only_hint = annotations.get("readOnlyHint", annotations.get("read_only_hint")) is True
+        else:
+            read_only_hint = getattr(annotations, "readOnlyHint", None) is True
+        input_schema = value.get("inputSchema", value.get("input_schema"))
+        if not isinstance(input_schema, dict):
+            input_schema = {}
+        description = value.get("description") or ""
+        value = {
+            "name": value.get("name"),
+            "description": description,
+            "inputSchema": input_schema,
+            "annotations": {"readOnlyHint": read_only_hint},
+        }
+        payload.append(value)
+    payload.sort(key=lambda item: str(item.get("name", "")) if isinstance(item, dict) else str(item))
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 _DEFAULT_TOOL_TIMEOUT = 300      # seconds for tool calls

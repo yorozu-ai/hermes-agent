@@ -53,13 +53,11 @@ class MCPServerRunMixin:
     async def _wait_for_lifecycle_event(self) -> str:
         """Serve until a lifecycle event: ``"shutdown"`` (exits run), ``"reconnect"`` (session torn
         down, transport re-entered; event cleared first) or ``"recycle"`` (stdio idle/lifetime
-        limit; restarts lazily on next call). Shutdown wins a tie. A keepalive (``ping``,
-        list_tools fallback) runs every ``keepalive_interval`` (must stay below the server's
-        session TTL); a failure triggers a reconnect.
-
-        Periodically sends a lightweight keepalive (``ping``, with a ``list_tools`` fallback for servers
-        that don't implement the optional ping utility — see :meth:`_keepalive_probe`) to prevent
-        TCP/session state from going stale during idle periods (#17003).
+        limit; restarts lazily on next call). Shutdown wins a tie. Every
+        ``keepalive_interval`` (which must stay below the server's session TTL),
+        ``_keepalive_probe`` checks transport liveness and fetches the tool
+        manifest for tool-capable servers. A failure triggers a reconnect, and
+        registration-relevant changes refresh the registered schemas (#17003).
         """
         keepalive_interval = max(
             _core._MIN_KEEPALIVE_INTERVAL,
@@ -87,7 +85,14 @@ class MCPServerRunMixin:
                         continue
                     try:
                         async with self._rpc_lock:
-                            await self._keepalive_probe()
+                            keepalive_tools = await self._keepalive_probe()
+                            keepalive_revision = self._tool_manifest_revision
+                        if keepalive_tools is not None:
+                            await self._refresh_tools(
+                                new_mcp_tools=keepalive_tools,
+                                manifest_revision=keepalive_revision,
+                                manifest_epoch=self._session_epoch,
+                            )
                     except Exception as exc:
                         root = _errors._unwrap_exception_group(exc)
                         logger.warning("MCP server '%s' keepalive failed, triggering reconnect (state: connected → "

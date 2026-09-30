@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from tools.mcp_tool import MCPServerTask
+from tools.mcp_tool_common import mcp_tool_registration_fingerprint
 from tools.mcp_tool_registration import _register_server_tools
 from tools.registry import ToolRegistry
 
@@ -103,6 +104,159 @@ class TestRefreshTools:
             assert "mcp__live_srv__new_tool" in mock_registry.get_all_tool_names()
             assert "mcp__live_srv__new_tool" in resolve_toolset("live_srv")
             assert server._registered_tool_names == ["mcp__live_srv__new_tool"]
+
+    @pytest.mark.asyncio
+    async def test_refreshes_registration_schema_under_a_stable_name(self):
+        """Input changes refresh registration; output-only changes do not churn it."""
+        server = MCPServerTask("live_srv")
+        server._config = {}
+        old_tool = _make_mcp_tool("contact_create")
+        old_tool.inputSchema = {"type": "object", "properties": {"name": {"type": "string"}}}
+        old_tool.outputSchema = {"type": "object", "properties": {"contact": {}}}
+        old_tool.annotations = {"readOnlyHint": True, "title": "old"}
+        server._tools = [old_tool]
+        server._tool_registration_fingerprint = mcp_tool_registration_fingerprint(server._tools)
+        server._registered_tool_names = ["mcp__live_srv__contact_create"]
+        new_tool = _make_mcp_tool("contact_create")
+        new_tool.inputSchema = old_tool.inputSchema
+        new_tool.outputSchema = {
+            "type": "object",
+            "properties": {"contact": {"properties": {"race": {"type": "string"}}}},
+        }
+        new_tool.annotations = {"readOnlyHint": True, "title": "new"}
+        with patch(
+            "tools.mcp_tool_registration._register_server_tools",
+            return_value=server._registered_tool_names,
+        ) as register:
+            server._tool_manifest_revision = 2
+            server._tool_manifest_applied_revision = 2
+            stale_tool = _make_mcp_tool("contact_create")
+            stale_tool.inputSchema = {"type": "object"}
+            assert await server._refresh_tools(
+                new_mcp_tools=[stale_tool], manifest_revision=1
+            ) is False
+            register.assert_not_called()
+            assert server._tools == [old_tool]
+
+            assert await server._refresh_tools(new_mcp_tools=[old_tool]) is False
+            register.assert_not_called()
+            assert await server._refresh_tools(new_mcp_tools=[new_tool]) is False
+            register.assert_not_called()
+            new_tool.inputSchema = {
+                "type": "object",
+                "properties": {"name": {"type": "string"}, "email": {"type": "string"}},
+            }
+            assert await server._refresh_tools(new_mcp_tools=[new_tool]) is True
+            register.assert_called_once()
+
+        assert server._tools == [new_tool]
+        assert server._tool_registration_fingerprint == mcp_tool_registration_fingerprint([new_tool])
+
+    @pytest.mark.asyncio
+    async def test_discards_manifest_that_finishes_after_session_reconnect(self):
+        """A delayed old-session response cannot replace a newly discovered manifest."""
+        server = MCPServerTask("live_srv")
+        server._config = {}
+        server.initialize_result = SimpleNamespace(capabilities=SimpleNamespace(tools=SimpleNamespace()))
+        old_session = SimpleNamespace()
+        new_session = SimpleNamespace()
+        server.session = old_session
+        server._session_epoch = 1
+
+        async def list_tools():
+            server.session = new_session
+            server._session_epoch = 2
+            return SimpleNamespace(tools=[_make_mcp_tool("stale_tool")])
+
+        old_session.list_tools = list_tools
+        await server._refresh_tools()
+
+        assert server._tools == []
+        assert server._tool_manifest_revision == 0
+
+
+    @pytest.mark.asyncio
+    async def test_suspect_health_refreshes_registration_from_manifest(self):
+        """A successful suspect-session probe applies changed input schemas."""
+        server = MCPServerTask("live_srv")
+        server.initialize_result = SimpleNamespace(capabilities=SimpleNamespace(tools=SimpleNamespace()))
+        server.session = SimpleNamespace()
+        server._suspect_reason = "keepalive failed"
+        manifest = [_make_mcp_tool("contact_create")]
+
+        with patch.object(MCPServerTask, "_keepalive_probe", new=AsyncMock(return_value=manifest)) as probe:
+            with patch.object(MCPServerTask, "_refresh_tools", new=AsyncMock()) as refresh:
+                assert await server.ensure_healthy() is True
+
+        probe.assert_awaited_once()
+        refresh.assert_awaited_once_with(
+            new_mcp_tools=manifest,
+            manifest_revision=server._tool_manifest_revision,
+            manifest_epoch=server._session_epoch,
+        )
+        assert server._suspect_reason is None
+
+
+@pytest.mark.asyncio
+async def test_mcp_sdk_accepts_new_output_schema_after_tools_list_refresh():
+    """A fresh tools/list updates the SDK validator used by the next tools/call."""
+    from mcp import ClientSession
+    from mcp.types import CallToolResult, ListToolsResult, Tool
+
+    def output_schema(*fields):
+        properties = {"id": {"type": "string"}}
+        properties.update({
+            field: {"type": "number" if field == "total_premium" else "string"}
+            for field in fields
+        })
+        return {
+            "type": "object",
+            "properties": {
+                "contact": {
+                    "type": "object",
+                    "properties": properties,
+                    "required": ["id"],
+                    "additionalProperties": False,
+                },
+            },
+            "required": ["contact"],
+            "additionalProperties": False,
+        }
+
+    old_tool = Tool(name="contact_create", input_schema={}, output_schema=output_schema())
+    new_tool = Tool(
+        name="contact_create",
+        input_schema={},
+        output_schema=output_schema("race", "client_tier", "total_premium"),
+    )
+    result = CallToolResult(
+        content=[],
+        structured_content={
+            "contact": {
+                "id": "1",
+                "race": "x",
+                "client_tier": "gold",
+                "total_premium": 100.0,
+            },
+        },
+        is_error=False,
+    )
+    session = ClientSession(dispatcher=object())
+    session.send_request = AsyncMock(side_effect=[
+        ListToolsResult(tools=[old_tool]),
+        result,
+        ListToolsResult(tools=[new_tool]),
+        result,
+    ])
+
+    await session.list_tools()
+    with pytest.raises(RuntimeError, match="Invalid structured content") as failure:
+        await session.call_tool("contact_create", arguments={})
+    assert "client_tier" in str(failure.value)
+
+    await session.list_tools()
+    refreshed = await session.call_tool("contact_create", arguments={})
+    assert refreshed.structured_content == result.structured_content
 
 
 class TestMessageHandler:

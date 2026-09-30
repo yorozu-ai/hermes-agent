@@ -7,17 +7,17 @@ always called ``tools/list`` during discovery, which raised
 ``MCPError(-32601 Method not found)`` against such servers, so a prompt-only
 server could never stay connected. Discovery/refresh remain capability-gated.
 
-The keepalive probe uses ``ping`` (MCP base-protocol liveness) for every
-server regardless of capability: it works uniformly and stays a few bytes
-instead of pulling the full ``tools/list`` payload (which is ~1 MB on large
-servers like Unreal Engine's editor MCP). Its cadence is configurable via
-``keepalive_interval`` so servers with short session TTLs stay alive.
+The keepalive probe uses ``ping`` (MCP base-protocol liveness) first and then
+refreshes ``tools/list`` for tool-capable servers. This keeps long-lived
+clients from retaining stale input/output schemas after a server deployment;
+the refresh is content-aware and does not churn the registry when unchanged.
+Its cadence is configurable via ``keepalive_interval``.
 
 Discovery gating ported from anomalyco/opencode#31271.
 """
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -124,19 +124,39 @@ class TestKeepaliveProbe:
 
 
     async def test_keepalive_uses_ping_legacy_fallback(self):
-        """No captured capabilities → still pings (no spurious list_tools)."""
+        """No captured capabilities → ping then a schema refresh."""
         task = MCPServerTask("test")
         assert task.initialize_result is None
         task.session = SimpleNamespace(
-            list_tools=AsyncMock(),
+            list_tools=AsyncMock(return_value=SimpleNamespace(tools=[])),
             send_ping=AsyncMock(),
         )
 
-        reason = await self._run_one_keepalive_cycle(task)
+        with patch.object(MCPServerTask, "_refresh_tools", new=AsyncMock()):
+            reason = await self._run_one_keepalive_cycle(task)
 
         assert reason == "shutdown"
         task.session.send_ping.assert_awaited_once()
-        task.session.list_tools.assert_not_called()
+        task.session.list_tools.assert_awaited_once()
+
+
+    async def test_keepalive_passes_manifest_to_registry_refresh(self):
+        """A successful liveness probe also publishes the fresh tool manifest."""
+        task = MCPServerTask("test")
+        task.initialize_result = _caps(tools=SimpleNamespace())
+        manifest = [SimpleNamespace(name="contact_create", description="v2", inputSchema={})]
+        task.session = SimpleNamespace(
+            send_ping=AsyncMock(),
+            list_tools=AsyncMock(return_value=SimpleNamespace(tools=manifest)),
+        )
+
+        with patch.object(MCPServerTask, "_refresh_tools", new=AsyncMock()) as refresh:
+            reason = await self._run_one_keepalive_cycle(task)
+
+        assert reason == "shutdown"
+        refresh.assert_awaited_once_with(
+            new_mcp_tools=manifest, manifest_revision=1, manifest_epoch=task._session_epoch
+        )
 
 
 class TestKeepaliveInterval:
@@ -149,7 +169,11 @@ class TestKeepaliveInterval:
         """Run one keepalive cycle and capture the ``asyncio.wait`` timeout."""
         task = MCPServerTask("test")
         task._config = config
-        task.session = SimpleNamespace(send_ping=AsyncMock())
+        task.initialize_result = _caps(tools=SimpleNamespace())
+        task.session = SimpleNamespace(
+            send_ping=AsyncMock(),
+            list_tools=AsyncMock(return_value=SimpleNamespace(tools=[])),
+        )
         captured = {}
         real_wait = asyncio.wait
 
@@ -222,13 +246,13 @@ class TestKeepaliveProbeFallback:
         task.initialize_result = _caps(tools=SimpleNamespace())
         task.session = SimpleNamespace(
             send_ping=AsyncMock(),
-            list_tools=AsyncMock(),
+            list_tools=AsyncMock(return_value=SimpleNamespace(tools=[])),
         )
 
         await task._keepalive_probe()
 
         task.session.send_ping.assert_awaited_once()
-        task.session.list_tools.assert_not_called()
+        task.session.list_tools.assert_awaited_once()
         assert task._ping_unsupported is False
 
 
@@ -329,6 +353,22 @@ class TestKeepaliveProbeFallback:
 
         assert task._ping_unsupported is False
 
+    async def test_list_tools_failure_after_ping_is_not_retried_or_latched(self):
+        """A manifest timeout must not be mistaken for an unsupported ping."""
+        task = MCPServerTask("test")
+        task.initialize_result = _caps(tools=SimpleNamespace())
+        task.session = SimpleNamespace(
+            send_ping=AsyncMock(),
+            list_tools=AsyncMock(side_effect=asyncio.TimeoutError()),
+        )
+
+        with pytest.raises((TimeoutError, asyncio.TimeoutError)):
+            await task._keepalive_probe()
+
+        task.session.send_ping.assert_awaited_once()
+        task.session.list_tools.assert_awaited_once()
+        assert task._ping_unsupported is False
+
     async def test_silent_ping_drop_no_tools_propagates(self):
         """A server that has no tools capability and times out on ping has no
         fallback probe — the timeout must propagate immediately."""
@@ -345,4 +385,3 @@ class TestKeepaliveProbeFallback:
         # list_tools must not be called — no tools capability advertised.
         task.session.list_tools.assert_not_called()
         assert task._ping_unsupported is False
-

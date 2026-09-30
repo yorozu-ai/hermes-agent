@@ -9,7 +9,7 @@ import time
 from typing import Iterable, Optional
 from tools.mcp_tool_errors import _is_method_not_found_error, _unwrap_exception_group
 from tools.mcp_tool_schema import mcp_prefixed_tool_name
-from tools.mcp_tool_common import _core
+from tools.mcp_tool_common import _core, mcp_tool_registration_fingerprint
 from tools import mcp_tool_registration as _registration
 
 logger = logging.getLogger("tools.mcp_tool")
@@ -129,24 +129,55 @@ class MCPServerHealthMixin:
             if registry.get_toolset_for_tool(tool_name) == f"mcp-{self.name}":
                 _registration._deregister_mcp_tool_all_scopes(self, tool_name)
 
-    async def _refresh_tools(self):
-        """Re-fetch tools on ``tools/list_changed`` and update the registry. The lock serializes rapid-fire
-        notifications; after the list_tools ``await`` all mutations are synchronous — atomic on the event loop."""
+    async def _refresh_tools(self, new_mcp_tools=None, manifest_revision=None, manifest_epoch=None):
+        """Refresh the registry from a notification or keepalive manifest.
+
+        The lock serializes rapid-fire notifications; after the list_tools
+        ``await`` all mutations are synchronous — atomic on the event loop.
+        Unchanged manifests are ignored so ordinary keepalives do not churn
+        registry generations or invalidate prompt caches.
+        """
         if not self._advertises_tools():
             return  # tools/list would raise MCPError(-32601)
         async with self._refresh_lock:
             old_tool_names = set(self._registered_tool_names)
-            async with self._rpc_lock:
-                new_mcp_tools = await _core._paginate_full_list(self.session.list_tools, "tools", self.name)
+            if new_mcp_tools is None:
+                session = self.session
+                session_epoch = self._session_epoch
+                async with self._rpc_lock:
+                    new_mcp_tools = await _core._paginate_full_list(session.list_tools, "tools", self.name)
+                if self.session is not session or self._session_epoch != session_epoch:
+                    logger.debug("MCP server '%s': ignoring manifest from an old session", self.name)
+                    return False
+                manifest_epoch = session_epoch
+                self._tool_manifest_revision += 1
+                manifest_revision = self._tool_manifest_revision
+            elif manifest_revision is None:
+                manifest_revision = self._tool_manifest_revision
+            if manifest_epoch is not None and manifest_epoch != self._session_epoch:
+                logger.debug("MCP server '%s': ignoring manifest from session epoch %d (current %d)",
+                             self.name, manifest_epoch, self._session_epoch)
+                return False
+            if manifest_revision < self._tool_manifest_applied_revision:
+                logger.debug("MCP server '%s': ignoring stale tool manifest revision %d (applied %d)",
+                             self.name, manifest_revision, self._tool_manifest_applied_revision)
+                return False
+            new_fingerprint = mcp_tool_registration_fingerprint(new_mcp_tools)
+            self._tools = new_mcp_tools
+            if new_fingerprint == self._tool_registration_fingerprint:
+                self._tool_manifest_applied_revision = manifest_revision
+                logger.debug("MCP server '%s': manifest refreshed; tool registration unchanged", self.name)
+                return False
             # Remove only stale names first — no nuke-and-repave: live turns may hold tool-call
             # IDs pointing at existing handlers; in-place replacement avoids "not connected" races.
             self._deregister_owned(old_tool_names - {mcp_prefixed_tool_name(self.name, tool.name) for tool in new_mcp_tools})
             # Re-register; a raw name can become ambiguous after normalization without changing
             # its normalized name, so also drop old entries the final registration no longer owns.
-            self._tools = new_mcp_tools
             registered_names = _registration._register_server_tools(self.name, self, self._config)
             self._deregister_owned(old_tool_names - set(registered_names))
             self._registered_tool_names = registered_names
+            self._tool_registration_fingerprint = new_fingerprint
+            self._tool_manifest_applied_revision = manifest_revision
             new_tool_names = set(registered_names)
             changes = [f"{label}: {', '.join(sorted(names))}" for label, names in
                        (("added", new_tool_names - old_tool_names), ("removed", old_tool_names - new_tool_names)) if names]
@@ -156,17 +187,32 @@ class MCPServerHealthMixin:
             else:
                 logger.info("MCP server '%s': dynamically refreshed %d tool(s) (no changes)",
                             self.name, len(self._registered_tool_names))
+            return True
 
-    async def _keepalive_probe(self) -> None:
-        """Exercise the session; raise on a genuine connection failure. ``ping`` first (cheap,
-        OPTIONAL); on -32601 latch ``_ping_unsupported`` (reset per transport connection) and fall
-        back to ``list_tools`` when the server advertises tools, else the -32601 propagates."""
+    async def _keepalive_probe(self) -> Optional[list]:
+        """Exercise the session and return a fresh tool manifest when available.
+
+        ``ping`` runs first; tool-capable servers then use ``tools/list`` so an
+        output-schema-only deployment is observed without requiring a manual
+        reload. On -32601, latch ``_ping_unsupported`` (reset per transport
+        connection) and use ``list_tools`` as the liveness probe; prompt-only
+        servers propagate the unsupported-ping error.
+        """
+        session = self.session
+        session_epoch = self._session_epoch
+
         async def list_tools():
-            await asyncio.wait_for(self.session.list_tools(), timeout=_KEEPALIVE_RPC_TIMEOUT)
+            tools = await asyncio.wait_for(
+                _core._paginate_full_list(session.list_tools, "tools", self.name),
+                timeout=_KEEPALIVE_RPC_TIMEOUT,
+            )
+            if self.session is not session or self._session_epoch != session_epoch:
+                return None
+            self._tool_manifest_revision += 1
+            return tools
         if not self._ping_unsupported:
             try:
-                await asyncio.wait_for(self.session.send_ping(), timeout=_KEEPALIVE_RPC_TIMEOUT)
-                return
+                await asyncio.wait_for(session.send_ping(), timeout=_KEEPALIVE_RPC_TIMEOUT)
             except Exception as exc:
                 if _is_method_not_found_error(exc):
                     if not self._advertises_tools():  # ping definitively unsupported, nothing to fall back to
@@ -178,16 +224,22 @@ class MCPServerHealthMixin:
                     # A server that silently drops ping looks like a dead transport: confirm with
                     # list_tools before declaring it dead, else propagate the original failure.
                     try:
-                        await list_tools()
+                        keepalive_tools = await list_tools()
                     except Exception:
                         raise exc from None
                     self._ping_unsupported = True  # latch so later keepalives skip the 30s wait
                     logger.info("MCP server '%s': ping timed out but list_tools succeeded — server "
                                 "silently drops ping; using 'list_tools' for keepalive on this connection.", self.name)
-                    return
+                    return keepalive_tools
                 else:
                     raise  # closed transport, expired session, etc. — real failure
-        await list_tools()
+            else:
+                # Keep the manifest fetch outside the ping exception handler:
+                # a tools/list timeout is a real failure, not evidence that ping
+                # is unsupported and not a reason to issue a duplicate list.
+                # Ping proves transport liveness but carries no tool schema.
+                return await list_tools() if self._advertises_tools() else None
+        return await list_tools()
 
     def _mark_session_proven(self) -> None:
         """Record that the session demonstrated real health (keepalive or tool-call success).
@@ -231,7 +283,13 @@ class MCPServerHealthMixin:
             self._reconnect_event.set()
             return False
         try:
-            await asyncio.wait_for(self._keepalive_probe(), timeout=timeout)
+            keepalive_tools = await asyncio.wait_for(self._keepalive_probe(), timeout=timeout)
+            if keepalive_tools is not None:
+                await self._refresh_tools(
+                    new_mcp_tools=keepalive_tools,
+                    manifest_revision=self._tool_manifest_revision,
+                    manifest_epoch=self._session_epoch,
+                )
         except Exception as exc:
             root = _unwrap_exception_group(exc)
             logger.warning("MCP server '%s': suspect connection (%s) failed health check (%s: %s) — "
