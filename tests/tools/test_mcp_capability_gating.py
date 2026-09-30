@@ -154,7 +154,7 @@ class TestKeepaliveProbe:
             reason = await self._run_one_keepalive_cycle(task)
 
         assert reason == "shutdown"
-        refresh.assert_awaited_once_with(new_mcp_tools=manifest)
+        refresh.assert_awaited_once_with(new_mcp_tools=manifest, manifest_revision=1)
 
 
 class TestKeepaliveInterval:

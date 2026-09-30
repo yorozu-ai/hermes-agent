@@ -126,6 +126,16 @@ class TestRefreshTools:
             "tools.mcp_tool_registration._register_server_tools",
             return_value=server._registered_tool_names,
         ) as register:
+            server._tool_manifest_revision = 2
+            server._tool_manifest_applied_revision = 2
+            stale_tool = _make_mcp_tool("contact_create")
+            stale_tool.inputSchema = {"type": "object"}
+            assert await server._refresh_tools(
+                new_mcp_tools=[stale_tool], manifest_revision=1
+            ) is False
+            register.assert_not_called()
+            assert server._tools == [old_tool]
+
             assert await server._refresh_tools(new_mcp_tools=[old_tool]) is False
             register.assert_not_called()
             assert await server._refresh_tools(new_mcp_tools=[new_tool]) is False

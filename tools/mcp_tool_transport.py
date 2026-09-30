@@ -478,7 +478,9 @@ class MCPServerTransportMixin:
                 self._list_cache_meta = {}
                 self._tools = await _core._paginate_full_list(
                     self.session.list_tools, "tools", self.name, cache_meta_out=self._list_cache_meta)
+                self._tool_manifest_revision += 1
         self._tool_registration_fingerprint = mcp_tool_registration_fingerprint(self._tools)
+        self._tool_manifest_applied_revision = self._tool_manifest_revision
         self._register_discovered_tools_if_needed()
 
     def _register_discovered_tools_if_needed(self) -> None:

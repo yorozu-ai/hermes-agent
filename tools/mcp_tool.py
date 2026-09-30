@@ -316,7 +316,8 @@ class MCPServerTask(MCPServerRunMixin, MCPServerTransportMixin, MCPServerHealthM
         "_recycled_reason", "initialize_result", "_ping_unsupported", "_list_cache_meta",
         "_reconnect_retries", "_session_proven", "_was_parked", "_inflight_tasks", "_reconnecting",
         "_suspect_reason", "_teardown_race", "_permanent_grace_used", "_stdio_child_pids",
-        "_ever_connected", "_sse_fallback", "_tool_registration_fingerprint")
+        "_ever_connected", "_sse_fallback", "_tool_registration_fingerprint",
+        "_tool_manifest_revision", "_tool_manifest_applied_revision")
 
     def __init__(self, name: str):
         self.name = name
@@ -394,6 +395,8 @@ class MCPServerTask(MCPServerRunMixin, MCPServerTransportMixin, MCPServerHealthM
         # Keep the registration-relevant manifest fingerprint so keepalives do
         # not invalidate prompt caches for output-schema-only changes.
         self._tool_registration_fingerprint: str = ""
+        self._tool_manifest_revision: int = 0
+        self._tool_manifest_applied_revision: int = 0
 
     # Content types a real Streamable-HTTP endpoint may return on the initial POST/GET;
     # anything else on a 2xx means the URL is not an MCP endpoint.

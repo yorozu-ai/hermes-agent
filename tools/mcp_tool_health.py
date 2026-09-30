@@ -129,7 +129,7 @@ class MCPServerHealthMixin:
             if registry.get_toolset_for_tool(tool_name) == f"mcp-{self.name}":
                 _registration._deregister_mcp_tool_all_scopes(self, tool_name)
 
-    async def _refresh_tools(self, new_mcp_tools=None):
+    async def _refresh_tools(self, new_mcp_tools=None, manifest_revision=None):
         """Refresh the registry from a notification or keepalive manifest.
 
         The lock serializes rapid-fire notifications; after the list_tools
@@ -144,9 +144,18 @@ class MCPServerHealthMixin:
             if new_mcp_tools is None:
                 async with self._rpc_lock:
                     new_mcp_tools = await _core._paginate_full_list(self.session.list_tools, "tools", self.name)
+                    self._tool_manifest_revision += 1
+                    manifest_revision = self._tool_manifest_revision
+            elif manifest_revision is None:
+                manifest_revision = self._tool_manifest_revision
+            if manifest_revision < self._tool_manifest_applied_revision:
+                logger.debug("MCP server '%s': ignoring stale tool manifest revision %d (applied %d)",
+                             self.name, manifest_revision, self._tool_manifest_applied_revision)
+                return False
             new_fingerprint = mcp_tool_registration_fingerprint(new_mcp_tools)
             self._tools = new_mcp_tools
             if new_fingerprint == self._tool_registration_fingerprint:
+                self._tool_manifest_applied_revision = manifest_revision
                 logger.debug("MCP server '%s': manifest refreshed; tool registration unchanged", self.name)
                 return False
             # Remove only stale names first — no nuke-and-repave: live turns may hold tool-call
@@ -158,6 +167,7 @@ class MCPServerHealthMixin:
             self._deregister_owned(old_tool_names - set(registered_names))
             self._registered_tool_names = registered_names
             self._tool_registration_fingerprint = new_fingerprint
+            self._tool_manifest_applied_revision = manifest_revision
             new_tool_names = set(registered_names)
             changes = [f"{label}: {', '.join(sorted(names))}" for label, names in
                        (("added", new_tool_names - old_tool_names), ("removed", old_tool_names - new_tool_names)) if names]
@@ -179,10 +189,12 @@ class MCPServerHealthMixin:
         servers propagate the unsupported-ping error.
         """
         async def list_tools():
-            return await asyncio.wait_for(
+            tools = await asyncio.wait_for(
                 _core._paginate_full_list(self.session.list_tools, "tools", self.name),
                 timeout=_KEEPALIVE_RPC_TIMEOUT,
             )
+            self._tool_manifest_revision += 1
+            return tools
         if not self._ping_unsupported:
             try:
                 await asyncio.wait_for(self.session.send_ping(), timeout=_KEEPALIVE_RPC_TIMEOUT)

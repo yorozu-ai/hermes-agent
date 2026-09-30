@@ -86,8 +86,12 @@ class MCPServerRunMixin:
                     try:
                         async with self._rpc_lock:
                             keepalive_tools = await self._keepalive_probe()
+                            keepalive_revision = self._tool_manifest_revision
                         if keepalive_tools is not None:
-                            await self._refresh_tools(new_mcp_tools=keepalive_tools)
+                            await self._refresh_tools(
+                                new_mcp_tools=keepalive_tools,
+                                manifest_revision=keepalive_revision,
+                            )
                     except Exception as exc:
                         root = _errors._unwrap_exception_group(exc)
                         logger.warning("MCP server '%s' keepalive failed, triggering reconnect (state: connected → "
