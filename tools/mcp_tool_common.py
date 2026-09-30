@@ -1,6 +1,8 @@
 """Small pure helpers shared by the tools.mcp_tool_* modules: SDK 1.x/2.x field access,
 error-text sanitising, numeric/bool coercion, timeouts and jitter. No origin state."""
 
+import hashlib
+import json
 import logging
 import math
 import os
@@ -36,6 +38,42 @@ def mcp_field(obj, snake: str, camel: str, default=None):
     if value is _MISSING:
         value = getattr(obj, camel, _MISSING)
     return default if value is _MISSING else value
+
+
+def mcp_tool_fingerprint(tools: list[Any]) -> str:
+    """Fingerprint complete MCP tool definitions, including output schemas."""
+    payload = []
+    for tool in tools or []:
+        if isinstance(tool, dict):
+            value = tool
+        else:
+            value = None
+            for method_name in ("model_dump", "dict"):
+                method = getattr(tool, method_name, None)
+                if callable(method):
+                    try:
+                        value = method(mode="json", by_alias=True)
+                    except TypeError:
+                        try:
+                            value = method(by_alias=True)
+                        except TypeError:
+                            value = method()
+                    except Exception:
+                        value = None
+                    if isinstance(value, dict):
+                        break
+            if not isinstance(value, dict):
+                value = {
+                    "name": mcp_field(tool, "name", "name"),
+                    "description": mcp_field(tool, "description", "description"),
+                    "inputSchema": mcp_field(tool, "input_schema", "inputSchema"),
+                    "outputSchema": mcp_field(tool, "output_schema", "outputSchema"),
+                    "annotations": mcp_field(tool, "annotations", "annotations"),
+                }
+        payload.append(value)
+    payload.sort(key=lambda item: str(item.get("name", "")) if isinstance(item, dict) else str(item))
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 _DEFAULT_TOOL_TIMEOUT = 300      # seconds for tool calls

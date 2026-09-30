@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from typing import Dict, Optional, Set
 from tools.mcp_tool_errors import NonMcpEndpointError, _apply_identity_header, _handshake_rejected_as_modern, _is_streamable_http_rejection, _make_mcp_body_cap_transport, _make_redirect_header_stripper, _resolve_client_cert, _unwrap_exception_group
 from tools.mcp_tool_lifecycle import _filter_mcp_children, _orphan_stdio_pid_servers, _orphan_stdio_pids, _stdio_pgids, _stdio_pids
-from tools.mcp_tool_common import _core
+from tools.mcp_tool_common import _core, mcp_tool_fingerprint
 from tools import mcp_tool_config as _config
 from tools import mcp_tool_lifecycle as _lifecycle
 from tools import mcp_tool_registration as _registration
@@ -478,6 +478,7 @@ class MCPServerTransportMixin:
                 self._list_cache_meta = {}
                 self._tools = await _core._paginate_full_list(
                     self.session.list_tools, "tools", self.name, cache_meta_out=self._list_cache_meta)
+        self._tool_schema_fingerprint = mcp_tool_fingerprint(self._tools)
         self._register_discovered_tools_if_needed()
 
     def _register_discovered_tools_if_needed(self) -> None:

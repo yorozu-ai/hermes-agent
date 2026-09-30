@@ -316,7 +316,7 @@ class MCPServerTask(MCPServerRunMixin, MCPServerTransportMixin, MCPServerHealthM
         "_recycled_reason", "initialize_result", "_ping_unsupported", "_list_cache_meta",
         "_reconnect_retries", "_session_proven", "_was_parked", "_inflight_tasks", "_reconnecting",
         "_suspect_reason", "_teardown_race", "_permanent_grace_used", "_stdio_child_pids",
-        "_ever_connected", "_sse_fallback")
+        "_ever_connected", "_sse_fallback", "_tool_schema_fingerprint")
 
     def __init__(self, name: str):
         self.name = name
@@ -391,6 +391,10 @@ class MCPServerTask(MCPServerRunMixin, MCPServerTransportMixin, MCPServerHealthM
         self._list_cache_meta: dict = {}
         # Latched when ``ping`` returns -32601; keepalives then use list_tools. Reset per connect.
         self._ping_unsupported: bool = False
+        # Tool names can remain stable while an MCP server changes its input
+        # or output schema. Keep the complete manifest fingerprint so a
+        # keepalive can detect that contract drift.
+        self._tool_schema_fingerprint: str = ""
 
     # Content types a real Streamable-HTTP endpoint may return on the initial POST/GET;
     # anything else on a 2xx means the URL is not an MCP endpoint.
