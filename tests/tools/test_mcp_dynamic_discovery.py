@@ -141,6 +141,68 @@ class TestRefreshTools:
         assert server._tool_registration_fingerprint == mcp_tool_registration_fingerprint([new_tool])
 
 
+@pytest.mark.asyncio
+async def test_mcp_sdk_accepts_new_output_schema_after_tools_list_refresh():
+    """A fresh tools/list updates the SDK validator used by the next tools/call."""
+    from mcp import ClientSession
+    from mcp.types import CallToolResult, ListToolsResult, Tool
+
+    def output_schema(*fields):
+        properties = {"id": {"type": "string"}}
+        properties.update({
+            field: {"type": "number" if field == "total_premium" else "string"}
+            for field in fields
+        })
+        return {
+            "type": "object",
+            "properties": {
+                "contact": {
+                    "type": "object",
+                    "properties": properties,
+                    "required": ["id"],
+                    "additionalProperties": False,
+                },
+            },
+            "required": ["contact"],
+            "additionalProperties": False,
+        }
+
+    old_tool = Tool(name="contact_create", input_schema={}, output_schema=output_schema())
+    new_tool = Tool(
+        name="contact_create",
+        input_schema={},
+        output_schema=output_schema("race", "client_tier", "total_premium"),
+    )
+    result = CallToolResult(
+        content=[],
+        structured_content={
+            "contact": {
+                "id": "1",
+                "race": "x",
+                "client_tier": "gold",
+                "total_premium": 100.0,
+            },
+        },
+        is_error=False,
+    )
+    session = ClientSession(dispatcher=object())
+    session.send_request = AsyncMock(side_effect=[
+        ListToolsResult(tools=[old_tool]),
+        result,
+        ListToolsResult(tools=[new_tool]),
+        result,
+    ])
+
+    await session.list_tools()
+    with pytest.raises(RuntimeError, match="Invalid structured content") as failure:
+        await session.call_tool("contact_create", arguments={})
+    assert "client_tier" in str(failure.value)
+
+    await session.list_tools()
+    refreshed = await session.call_tool("contact_create", arguments={})
+    assert refreshed.structured_content == result.structured_content
+
+
 class TestMessageHandler:
     """Tests for MCPServerTask._make_message_handler dispatch."""
 
