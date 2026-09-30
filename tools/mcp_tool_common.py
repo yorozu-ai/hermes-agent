@@ -40,8 +40,13 @@ def mcp_field(obj, snake: str, camel: str, default=None):
     return default if value is _MISSING else value
 
 
-def mcp_tool_fingerprint(tools: list[Any]) -> str:
-    """Fingerprint complete MCP tool definitions, including output schemas."""
+def mcp_tool_registration_fingerprint(tools: list[Any]) -> str:
+    """Fingerprint the MCP fields that affect Hermes tool registration.
+
+    The MCP SDK absorbs ``outputSchema`` into its own result validator while
+    ``tools/list`` runs. Hermes only needs to republish a tool when the name,
+    description, input schema, or annotations used by registration change.
+    """
     payload = []
     for tool in tools or []:
         if isinstance(tool, dict):
@@ -67,9 +72,14 @@ def mcp_tool_fingerprint(tools: list[Any]) -> str:
                     "name": mcp_field(tool, "name", "name"),
                     "description": mcp_field(tool, "description", "description"),
                     "inputSchema": mcp_field(tool, "input_schema", "inputSchema"),
-                    "outputSchema": mcp_field(tool, "output_schema", "outputSchema"),
                     "annotations": mcp_field(tool, "annotations", "annotations"),
                 }
+        value = {
+            "name": value.get("name"),
+            "description": value.get("description"),
+            "inputSchema": value.get("inputSchema", value.get("input_schema")),
+            "annotations": value.get("annotations"),
+        }
         payload.append(value)
     payload.sort(key=lambda item: str(item.get("name", "")) if isinstance(item, dict) else str(item))
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)

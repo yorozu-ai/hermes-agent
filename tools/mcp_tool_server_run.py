@@ -57,7 +57,7 @@ class MCPServerRunMixin:
         ``keepalive_interval`` (which must stay below the server's session TTL),
         ``_keepalive_probe`` checks transport liveness and fetches the tool
         manifest for tool-capable servers. A failure triggers a reconnect, and
-        a changed manifest refreshes the registered schemas (#17003).
+        registration-relevant changes refresh the registered schemas (#17003).
         """
         keepalive_interval = max(
             _core._MIN_KEEPALIVE_INTERVAL,

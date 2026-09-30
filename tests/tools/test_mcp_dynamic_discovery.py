@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from tools.mcp_tool import MCPServerTask
-from tools.mcp_tool_common import mcp_tool_fingerprint
+from tools.mcp_tool_common import mcp_tool_registration_fingerprint
 from tools.mcp_tool_registration import _register_server_tools
 from tools.registry import ToolRegistry
 
@@ -106,16 +106,18 @@ class TestRefreshTools:
             assert server._registered_tool_names == ["mcp__live_srv__new_tool"]
 
     @pytest.mark.asyncio
-    async def test_refreshes_when_schema_changes_under_a_stable_name(self):
-        """A changed output schema must refresh even when the tool name is unchanged."""
+    async def test_refreshes_registration_schema_under_a_stable_name(self):
+        """Input changes refresh registration; output-only changes do not churn it."""
         server = MCPServerTask("live_srv")
         server._config = {}
         old_tool = _make_mcp_tool("contact_create")
+        old_tool.inputSchema = {"type": "object", "properties": {"name": {"type": "string"}}}
         old_tool.outputSchema = {"type": "object", "properties": {"contact": {}}}
         server._tools = [old_tool]
-        server._tool_schema_fingerprint = mcp_tool_fingerprint(server._tools)
+        server._tool_registration_fingerprint = mcp_tool_registration_fingerprint(server._tools)
         server._registered_tool_names = ["mcp__live_srv__contact_create"]
         new_tool = _make_mcp_tool("contact_create")
+        new_tool.inputSchema = old_tool.inputSchema
         new_tool.outputSchema = {
             "type": "object",
             "properties": {"contact": {"properties": {"race": {"type": "string"}}}},
@@ -126,11 +128,17 @@ class TestRefreshTools:
         ) as register:
             assert await server._refresh_tools(new_mcp_tools=[old_tool]) is False
             register.assert_not_called()
+            assert await server._refresh_tools(new_mcp_tools=[new_tool]) is False
+            register.assert_not_called()
+            new_tool.inputSchema = {
+                "type": "object",
+                "properties": {"name": {"type": "string"}, "email": {"type": "string"}},
+            }
             assert await server._refresh_tools(new_mcp_tools=[new_tool]) is True
             register.assert_called_once()
 
         assert server._tools == [new_tool]
-        assert server._tool_schema_fingerprint == mcp_tool_fingerprint([new_tool])
+        assert server._tool_registration_fingerprint == mcp_tool_registration_fingerprint([new_tool])
 
 
 class TestMessageHandler:

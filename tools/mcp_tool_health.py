@@ -9,7 +9,7 @@ import time
 from typing import Iterable, Optional
 from tools.mcp_tool_errors import _is_method_not_found_error, _unwrap_exception_group
 from tools.mcp_tool_schema import mcp_prefixed_tool_name
-from tools.mcp_tool_common import _core, mcp_tool_fingerprint
+from tools.mcp_tool_common import _core, mcp_tool_registration_fingerprint
 from tools import mcp_tool_registration as _registration
 
 logger = logging.getLogger("tools.mcp_tool")
@@ -144,20 +144,20 @@ class MCPServerHealthMixin:
             if new_mcp_tools is None:
                 async with self._rpc_lock:
                     new_mcp_tools = await _core._paginate_full_list(self.session.list_tools, "tools", self.name)
-            new_fingerprint = mcp_tool_fingerprint(new_mcp_tools)
-            if new_fingerprint == self._tool_schema_fingerprint:
-                logger.debug("MCP server '%s': tool manifest unchanged", self.name)
+            new_fingerprint = mcp_tool_registration_fingerprint(new_mcp_tools)
+            self._tools = new_mcp_tools
+            if new_fingerprint == self._tool_registration_fingerprint:
+                logger.debug("MCP server '%s': manifest refreshed; tool registration unchanged", self.name)
                 return False
             # Remove only stale names first — no nuke-and-repave: live turns may hold tool-call
             # IDs pointing at existing handlers; in-place replacement avoids "not connected" races.
             self._deregister_owned(old_tool_names - {mcp_prefixed_tool_name(self.name, tool.name) for tool in new_mcp_tools})
             # Re-register; a raw name can become ambiguous after normalization without changing
             # its normalized name, so also drop old entries the final registration no longer owns.
-            self._tools = new_mcp_tools
             registered_names = _registration._register_server_tools(self.name, self, self._config)
             self._deregister_owned(old_tool_names - set(registered_names))
             self._registered_tool_names = registered_names
-            self._tool_schema_fingerprint = new_fingerprint
+            self._tool_registration_fingerprint = new_fingerprint
             new_tool_names = set(registered_names)
             changes = [f"{label}: {', '.join(sorted(names))}" for label, names in
                        (("added", new_tool_names - old_tool_names), ("removed", old_tool_names - new_tool_names)) if names]
